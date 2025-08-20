@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+chromadb
+crawl4ai
+openai>=1.0.0
+apscheduler
+python-dotenv
+streamlit
+requests
