@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH)
-CHROMA_DIR = os.getenv("CHROMA_DIR", "./data/chroma")
+_DEFAULT_CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "chroma"))
+CHROMA_DIR = os.getenv("CHROMA_DIR", _DEFAULT_CHROMA_DIR)
 TOP_K = int(os.getenv("TOP_K", "5"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEN_MODEL = os.getenv("GENERATION_MODEL", "gpt-5-nano")
@@ -37,23 +38,104 @@ client = chromadb.PersistentClient(path=CHROMA_DIR)
 ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=OPENAI_API_KEY, model_name=EMB_MODEL
 )
-collection = client.get_or_create_collection("hnu", embedding_function=ef)
+# Use a configurable collection name to stay consistent with ingestion
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "hnu")
 oai = OpenAI(api_key=OPENAI_API_KEY)
 
-def retrieve(query: str, k: int = TOP_K):
-    res = collection.query(query_texts=[query], n_results=k, include=["metadatas", "documents"])
+def _get_collection(name: str | None = None):
+    """Return a collection handle by name, creating it if needed."""
+    return client.get_or_create_collection(name or COLLECTION_NAME, embedding_function=ef)
+
+def retrieve(query: str, k: int = TOP_K, collection_name: str | None = None):
+    # Retrieve more candidates for reranking and deduplication
+    candidate_k = min(k * 3, 50)
+    coll = _get_collection(collection_name)
+    try:
+        res = coll.query(
+            query_texts=[query], 
+            n_results=candidate_k, 
+            include=["metadatas", "documents", "distances"]
+        )
+    except chromadb.errors.NotFoundError:
+        # Collection might have been deleted or path changed; refresh handle and retry once
+        coll = _get_collection(collection_name)
+        res = coll.query(
+            query_texts=[query], 
+            n_results=candidate_k, 
+            include=["metadatas", "documents", "distances"]
+        )
     docs = res["documents"][0] if res.get("documents") else []
     metas = res["metadatas"][0] if res.get("metadatas") else []
-    return [{"text": d, "url": m.get("url",""), "title": m.get("title",""), "ts": m.get("ts")}
-            for d,m in zip(docs, metas)]
+    distances = res["distances"][0] if res.get("distances") else []
+    
+    # Build candidates with scores
+    candidates = []
+    for i, (doc, meta) in enumerate(zip(docs, metas)):
+        score = 1.0 - (distances[i] if i < len(distances) else 0.5)  # Convert distance to similarity
+        candidates.append({
+            "text": doc,
+            "url": meta.get("url", ""),
+            "title": meta.get("title", ""),
+            "ts": meta.get("ts"),
+            "chunk_index": meta.get("chunk_index", 0),
+            "content_length": meta.get("content_length", len(doc.split())),
+            "score": score
+        })
+    
+    # Simple MMR-style reranking: select diverse, high-scoring chunks
+    selected = []
+    seen_urls = set()
+    total_words = 0
+    max_words = 1200  # Token budget (~1500 tokens)
+    
+    # Sort by score descending
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    
+    for cand in candidates:
+        if len(selected) >= k:
+            break
+        
+        url = cand["url"]
+        words = cand["content_length"]
+        
+        # Skip if we already have 2+ chunks from this URL (diversity)
+        url_count = sum(1 for s in selected if s["url"] == url)
+        if url_count >= 2:
+            continue
+            
+        # Skip if adding this would exceed word budget
+        if total_words + words > max_words and selected:
+            continue
+            
+        selected.append(cand)
+        total_words += words
+        seen_urls.add(url)
+    
+    return selected
 
 def generate(query: str, ctxs: List[Dict]) -> Dict:
-    context = "\n\n".join([f"[{i+1}] {c['text']}" for i,c in enumerate(ctxs)])
-    citations = [{"url": c["url"], "title": c.get("title", "")} for c in ctxs if c.get("url")]
+    # Build context with better formatting and source info
+    context_parts = []
+    for i, c in enumerate(ctxs):
+        chunk_info = f" (chunk {c.get('chunk_index', 0)+1}/{c.get('chunk_count', 1)})" if c.get('chunk_count', 1) > 1 else ""
+        context_parts.append(f"[{i+1}] {c['text']}{chunk_info}")
+    
+    context = "\n\n".join(context_parts)
+    
+    # Deduplicate citations by URL
+    seen_urls = set()
+    citations = []
+    for c in ctxs:
+        url = c.get("url")
+        if url and url not in seen_urls:
+            citations.append({"url": url, "title": c.get("title", "")})
+            seen_urls.add(url)
+    
     sys = (
         "You answer ONLY from the provided HNU context. "
         "If unsure or missing, say you couldn't find it on hnu.de. "
-        "Keep answers concise and include numbered citations like [1], [2]."
+        "Keep answers concise and include numbered citations like [1], [2]. "
+        "When multiple chunks are from the same page, synthesize the information."
     )
     user = f"Question: {query}\n\nContext:\n{context}"
 

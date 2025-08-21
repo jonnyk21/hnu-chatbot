@@ -30,9 +30,9 @@ def _auth(authorization: str = Header(default="")):
 
 
 @app.post("/refresh")
-def refresh_index(_: None = Depends(_auth)):
-    added = refresh()
-    return {"status": "ok", "added_chunks": added}
+def refresh_index(clear: bool = False, _: None = Depends(_auth)):
+    added = refresh(clear_override=clear)
+    return {"status": "ok", "cleared": clear, "added_chunks": added}
 
 
 @app.get("/healthz")

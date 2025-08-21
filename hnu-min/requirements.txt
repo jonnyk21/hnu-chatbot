@@ -2,6 +2,7 @@ fastapi
 uvicorn
 chromadb
 crawl4ai
+cssselect
 openai>=1.0.0
 apscheduler
 python-dotenv
