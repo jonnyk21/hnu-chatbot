@@ -15,6 +15,21 @@ GEN_MODEL = os.getenv("GENERATION_MODEL", "gpt-5-nano")
 EMB_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 GEN_TEMPERATURE = os.getenv("GEN_TEMPERATURE")
 
+# Optional LangSmith tracing; falls back to no-op if unavailable
+try:
+    from langsmith import traceable
+except Exception:  # pragma: no cover - optional dependency
+    def traceable(*args, **kwargs):
+        def _decorator(func):
+            return func
+        return _decorator
+
+# Optional OpenAI wrapper for automatic tracing
+try:
+    from langsmith.wrappers import wrap_openai  # type: ignore
+except Exception:  # pragma: no cover
+    wrap_openai = None  # type: ignore
+
 # Ensure Chromadb's OpenAI embedding function sees an API key
 if not os.getenv("CHROMA_OPENAI_API_KEY") and OPENAI_API_KEY:
     os.environ["CHROMA_OPENAI_API_KEY"] = OPENAI_API_KEY
@@ -40,12 +55,20 @@ ef = embedding_functions.OpenAIEmbeddingFunction(
 )
 # Use a configurable collection name to stay consistent with ingestion
 COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "hnu")
-oai = OpenAI(api_key=OPENAI_API_KEY)
+# Wrap the OpenAI client if LangSmith wrapper is available
+if wrap_openai:
+    try:
+        oai = wrap_openai(OpenAI(api_key=OPENAI_API_KEY))
+    except Exception:
+        oai = OpenAI(api_key=OPENAI_API_KEY)
+else:
+    oai = OpenAI(api_key=OPENAI_API_KEY)
 
 def _get_collection(name: str | None = None):
     """Return a collection handle by name, creating it if needed."""
     return client.get_or_create_collection(name or COLLECTION_NAME, embedding_function=ef)
 
+@traceable(name="retrieve", run_type="tool")
 def retrieve(query: str, k: int = TOP_K, collection_name: str | None = None):
     # Retrieve more candidates for reranking and deduplication
     candidate_k = min(k * 3, 50)
@@ -113,6 +136,7 @@ def retrieve(query: str, k: int = TOP_K, collection_name: str | None = None):
     
     return selected
 
+@traceable(name="generate", run_type="chain")
 def generate(query: str, ctxs: List[Dict]) -> Dict:
     # Build context with better formatting and source info
     context_parts = []

@@ -18,6 +18,15 @@ from chromadb.utils import embedding_functions
 from .utils import clean_html, chunk_text, detect_language
 from dotenv import load_dotenv
 
+# Optional LangSmith tracing; falls back to no-op if unavailable
+try:
+    from langsmith import traceable
+except Exception:  # pragma: no cover - optional dependency
+    def traceable(*args, **kwargs):
+        def _decorator(func):
+            return func
+        return _decorator
+
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH)
 # Default to project-root data/chroma to keep a single persistent location
@@ -291,6 +300,7 @@ def _strip_boilerplate(text: str) -> str:
     
     return t.strip()
 
+@traceable(name="discover_urls", run_type="tool")
 async def _discover_urls(start_url: str, max_urls: int = MAX_URLS) -> list[str]:
     """Discover crawl targets from the site's sitemap.xml only."""
     domain = _domain_from_url(start_url)
@@ -390,6 +400,7 @@ async def _discover_urls(start_url: str, max_urls: int = MAX_URLS) -> list[str]:
     print(f"[ingest] discovered via sitemap: raw={len(collected_pages)} normalized={len(normalized)} (cap {max_urls})")
     return normalized[:max_urls], sitemap_metadata
 
+@traceable(name="crawl_many", run_type="tool")
 async def _crawl_many(urls: list[str]) -> list:
     primary = _build_run_config()
     results_all = []
@@ -406,40 +417,7 @@ async def _crawl_many(urls: list[str]) -> list:
             results_all.extend(res)
     return results_all
 
-def _upsert_batches(chunks: list[str], ids: list[str], metas: list[dict], batch_size: int = 100):
-    for i in range(0, len(chunks), batch_size):
-        collection.upsert(
-            documents=chunks[i:i+batch_size],
-            ids=ids[i:i+batch_size],
-            metadatas=metas[i:i+batch_size],
-        )
-
-def _purge_other_collections(target_name: str):
-    """Delete any collections except the target to guarantee a single active collection."""
-    try:
-        cols = client.list_collections()
-    except Exception as e:
-        print(f"[ingest] warn: could not list collections: {e}")
-        return
-    for c in cols or []:
-        try:
-            if getattr(c, "name", None) and c.name != target_name:
-                client.delete_collection(c.name)
-                print(f"[ingest] purged old collection '{c.name}'")
-        except Exception as e:
-            print(f"[ingest] warn: could not delete collection '{getattr(c, 'name', '?')}': {e}")
-
-def _reset_collection():
-    """Ensure only one collection exists: drop others and recreate the target fresh."""
-    global collection
-    _purge_other_collections(_COLLECTION_NAME)
-    try:
-        client.delete_collection(_COLLECTION_NAME)
-        print(f"[ingest] deleted collection '{_COLLECTION_NAME}'")
-    except Exception as e:
-        print(f"[ingest] info: delete target skipped or failed (may not exist): {e}")
-    collection = client.get_or_create_collection(_COLLECTION_NAME, embedding_function=ef)
-
+@traceable(name="full_ingest", run_type="chain")
 def full_ingest(max_urls: int = MAX_URLS) -> int:
     async def _run():
         urls, sitemap_meta = await _discover_urls(START_URL, max_urls=max_urls)
@@ -524,6 +502,7 @@ def full_ingest(max_urls: int = MAX_URLS) -> int:
 
     return added
 
+@traceable(name="refresh", run_type="chain")
 def refresh(clear_override: bool | None = None) -> int:
     """Refresh the index; always clear existing data to maintain a single collection.
 

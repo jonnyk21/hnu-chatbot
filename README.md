@@ -44,6 +44,12 @@ Notes:
 - `CHROMA_DIR` defaults to an absolute `data/chroma` under the repo to keep a unified store; override if needed.
 - `CHROMA_OPENAI_API_KEY` is set automatically from `OPENAI_API_KEY` for Chroma embeddings.
 
+### Tracing (optional)
+- Set `LANGSMITH_TRACING=true` to enable tracing to LangSmith.
+- Set `LANGSMITH_API_KEY=ls_...` and optionally `LANGSMITH_PROJECT` (defaults to `default`).
+- Optional: `LANGSMITH_ENDPOINT=https://api.smith.langchain.com`.
+- Tracing is integrated via `@traceable` decorators in `hnu-min/app/ingest.py` and `hnu-min/app/rag.py`, and the OpenAI client is wrapped with `wrap_openai` when available. When tracing is off or LangSmith isn't installed, behavior is unchanged.
+
 ## Run the services
 Backend (FastAPI):
 
